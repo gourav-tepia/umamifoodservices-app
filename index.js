@@ -4,6 +4,27 @@ const { Client, Environment } = require("square");
 const crypto = require("crypto");
 const bodyParser = require("body-parser");
 const PDFDocument = require("pdfkit"); // Import the pdfkit library
+const stripe = require("stripe")(
+  "sk_test_51NaWq3AfDQQKXJwGvYbce5wyZNNRods6PESd8HRNPmRpONBoxzt14u8JcoDxcAeDf3UMnzq6iAGINZQoZL65N2q900h9l4Imh3"
+);
+
+const firebase = require("firebase/app");
+require("firebase/firestore");
+const { getFirestore, doc, updateDoc } = require("@firebase/firestore");
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA5zB6NLN9NSmyi7NHtcyFgUo75-AXKPmo",
+  authDomain: "foodapp-testenv.firebaseapp.com",
+  databaseURL: "https://foodapp-testenv-default-rtdb.firebaseio.com",
+  projectId: "foodapp-testenv",
+  storageBucket: "foodapp-testenv.appspot.com",
+  messagingSenderId: "493591063203",
+  appId: "1:493591063203:web:fdc7f577cfd77a11eb6d16",
+  measurementId: "G-VBQDFV8DKL",
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = getFirestore();
 
 const fs = require("fs");
 const path = require("path");
@@ -374,6 +395,231 @@ app.get("/generatePdf", async (request, response) => {
     console.error(error);
     response.status(500).send({
       errorMessage: "PDF error; please try again;",
+    });
+  }
+});
+
+app.post("/create-stripe-customer", async (req, res) => {
+  try {
+    const customer = req.body.customer;
+    let customerId = customer?.stripeCustomer;
+
+    if (customerId) {
+      try {
+        const res = await stripe.customers.retrieve(customerId);
+        if (res?.deleted) customerId = null;
+      } catch (err) {
+        customerId = null;
+      }
+    }
+
+    if (!customerId) {
+      const data = {
+        name: customer.name,
+        email: customer.email,
+        phone: customer.phone,
+        address: {
+          city: customer.city,
+          country: "US",
+          line1: customer.address1,
+          line2: customer.address2,
+          postal_code: customer.zip,
+          state: customer.state,
+        },
+        metadata: {
+          reference_id: customer.id,
+        },
+      };
+      const response = await stripe.customers.create(data);
+      customerId = response.id;
+    }
+
+    res.send({
+      customer: customerId,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ errorMessage: error });
+  }
+});
+
+app.post("/create-stripe-payment-intent", async (req, res) => {
+  try {
+    const order = req.body?.order;
+    const customer = req.body?.customer;
+    const orderId = order?.id;
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: order.totalCost * 100,
+      currency: "usd",
+      customer: customer,
+      metadata: { orderId },
+      automatic_payment_methods: {
+        enabled: true,
+      },
+      description: `Order#: ${orderId}`,
+    });
+
+    res.send({
+      paymentIntent: paymentIntent.client_secret,
+      customer: customer,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      errorMessage: error,
+    });
+  }
+});
+
+app.post("/create-stripe-setup-intent", async (req, res) => {
+  try {
+    const customer = req.body?.customer;
+    const customerId = customer?.stripeCustomer;
+
+    const paymentIntent = await stripe.setupIntents.create({
+      customer: customerId,
+      description: `setup intent - customer: ${customer?.id} email: ${
+        customer?.email ?? customer?.email_address
+      }`,
+    });
+
+    res.send({
+      paymentIntent: paymentIntent.client_secret,
+      customer: customerId,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      errorMessage: error,
+    });
+  }
+});
+
+app.post("/fetch-stripe-all-saved-cards", async (req, res) => {
+  try {
+    const customer = req.body?.customer;
+
+    const response = await stripe.paymentMethods.list({
+      customer: customer,
+      type: "card",
+    });
+
+    res.send({
+      savedCards: response?.data ?? [],
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      errorMessage: error,
+    });
+  }
+});
+
+app.post("/delete-stripe-saved-card", async (req, res) => {
+  try {
+    const card = req.body?.card;
+
+    await stripe.paymentMethods.detach(card.id);
+
+    res.send({
+      success: true,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      errorMessage: error,
+    });
+  }
+});
+
+app.post("/charge-stripe-saved-card", async (req, res) => {
+  try {
+    const card = req.body?.card;
+    const customer = req.body?.customer;
+    const order = req.body?.order;
+    const orderId = order?.id;
+
+    await stripe.paymentIntents.create({
+      amount: order.totalCost * 100,
+      currency: "usd",
+      customer: customer,
+      payment_method: card.id,
+      off_session: true,
+      confirm: true,
+      description: `Order#: ${orderId}`,
+      metadata: { orderId },
+    });
+
+    res.send({
+      success: true,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      errorMessage: error,
+    });
+  }
+});
+
+app.post("/create-stripe-ach-payment-intent", async (req, res) => {
+  try {
+    const order = req.body?.order;
+    const customer = req.body?.customer;
+
+    const orderId = order?.id;
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: order.totalCost * 100,
+      currency: "usd",
+      customer: customer,
+      description: `Order#: ${orderId}`,
+      setup_future_usage: "off_session",
+      payment_method_types: ["us_bank_account"],
+      metadata: { orderId },
+      payment_method_options: {
+        us_bank_account: {
+          financial_connections: {
+            permissions: ["payment_method", "balances"],
+          },
+        },
+      },
+    });
+
+    res.send({
+      paymentIntent: paymentIntent.client_secret,
+      customer: customer,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({
+      errorMessage: error,
+    });
+  }
+});
+
+app.post("/stripe-webhook", async (req, res) => {
+  try {
+    const type = req.body?.type;
+
+    if (type === "payment_intent.payment_failed") {
+      const orderId = req.body?.data?.object?.metadata?.orderId;
+
+      const docRef = doc(db, "confirmed", orderId);
+
+      const updateData = {
+        payedWith: "None",
+      };
+
+      await updateDoc(docRef, updateData);
+    }
+
+    res.send({
+      success: true,
+    });
+  } catch (error) {
+    res.send({
+      success: false,
     });
   }
 });
